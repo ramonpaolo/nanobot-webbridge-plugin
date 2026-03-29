@@ -32,8 +32,7 @@ class WebBridgeConfig(Base):
     port: int = 18791
     allowed_connections: list[AllowedConnection] = Field(default_factory=list)
     hmac_secret: str = ""  # Shared secret for HMAC signatures
-    streaming: bool = True  # Enable streaming response
-    stream_chars_per_second: int = 100  # Speed of streaming simulation
+    streaming: bool = True  # Enable real streaming from LLM
 
 
 class WebBridgeChannel(BaseChannel):
@@ -46,9 +45,9 @@ class WebBridgeChannel(BaseChannel):
     3. HMAC signature verification on every message
     
     Streaming:
-    - Messages are sent as chunks for real-time feel
-    - Each chunk: {"type": "chunk", "content": "partial_text"}
-    - Final: {"type": "message", "content": "full_text", "chat_id": "..."}
+    - Real streaming from LLM via send_delta()
+    - Each chunk sent immediately to WebSocket client
+    - Supports stream_start, chunk, stream_end message types
     
     Configuration in nanobot config.json:
     
@@ -58,9 +57,8 @@ class WebBridgeChannel(BaseChannel):
           "enabled": true,
           "host": "0.0.0.0",
           "port": 18791,
-          "hmac_secret": "optional_hmac_secret",
           "streaming": true,
-          "stream_chars_per_second": 100,
+          "hmac_secret": "optional_hmac_secret",
           "allowed_connections": [
             {
               "api_key": "sk_live_your_api_key",
@@ -87,6 +85,10 @@ class WebBridgeChannel(BaseChannel):
         self._connected_clients: dict[str, asyncio.Queue] = {}
         self._ws_connections: dict[str, Any] = {}
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
+        
+        # Streaming state per chat
+        self._stream_buffers: dict[str, str] = {}  # chat_id -> accumulated content
+        self._stream_active: dict[str, bool] = {}  # chat_id -> is streaming
 
     def _find_connection(self, api_key: str, client_ip: str) -> AllowedConnection | None:
         """Find matching allowed connection."""
@@ -159,54 +161,66 @@ class WebBridgeChannel(BaseChannel):
         
         self._connected_clients.clear()
         self._ws_connections.clear()
+        self._stream_buffers.clear()
+        self._stream_active.clear()
         logger.info("WebBridge server stopped")
 
-    async def _stream_message(self, ws: Any, content: str) -> None:
+    async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
         """
-        Stream a message as chunks to the WebSocket client.
+        Deliver a streaming text chunk from the LLM.
         
-        Format:
-        - Start: {"type": "stream_start", "chat_id": "..."}
-        - Chunks: {"type": "chunk", "content": "partial_text"}
-        - End: {"type": "message", "content": "full_text", "chat_id": "..."}
+        This is called by the agent loop for each content delta during streaming.
+        We send it immediately to the WebSocket client.
         """
-        if not content or not self.config.streaming:
-            return
+        meta = metadata or {}
+        stream_id = meta.get("_stream_id", f"{chat_id}:0")
         
-        chars_per_second = self.config.stream_chars_per_second
-        delay = 1.0 / chars_per_second if chars_per_second > 0 else 0.01
+        # Get or create stream buffer
+        if stream_id not in self._stream_buffers:
+            self._stream_buffers[stream_id] = ""
+            self._stream_active[stream_id] = True
+            # Send stream_start
+            if chat_id in self._ws_connections:
+                try:
+                    await self._ws_connections[chat_id].send(json.dumps({
+                        "type": "stream_start",
+                        "content": "",
+                        "stream_id": stream_id,
+                    }, ensure_ascii=False))
+                except Exception as e:
+                    logger.error("WebBridge: Error sending stream_start: {}", e)
         
-        # Send stream start
-        await ws.send(json.dumps({
-            "type": "stream_start",
-            "content": ""
-        }, ensure_ascii=False))
+        # Accumulate and send chunk
+        self._stream_buffers[stream_id] += delta
         
-        # Stream content in chunks
-        # Use word-based chunks for more natural feel
-        words = content.split()
-        buffer = ""
-        
-        for word in words:
-            buffer += word + " "
-            
-            # Send chunk when buffer is large enough or at end
-            if len(buffer) >= 4 or word == words[-1]:
-                await ws.send(json.dumps({
+        if chat_id in self._ws_connections:
+            try:
+                await self._ws_connections[chat_id].send(json.dumps({
                     "type": "chunk",
-                    "content": buffer
+                    "content": delta,
+                    "stream_id": stream_id,
                 }, ensure_ascii=False))
-                buffer = ""
-                
-                if delay > 0:
-                    await asyncio.sleep(delay)
+            except Exception as e:
+                logger.error("WebBridge: Error sending chunk: {}", e)
         
-        # If anything left in buffer, send it
-        if buffer:
-            await ws.send(json.dumps({
-                "type": "chunk",
-                "content": buffer
-            }, ensure_ascii=False))
+        # Check for stream end
+        if meta.get("_stream_end"):
+            self._stream_active[stream_id] = False
+            
+            # Send final message with complete content
+            if chat_id in self._ws_connections:
+                try:
+                    full_content = self._stream_buffers.pop(stream_id, "")
+                    await self._ws_connections[chat_id].send(json.dumps({
+                        "type": "message",
+                        "content": full_content,
+                        "stream_id": stream_id,
+                        "stream_end": True,
+                    }, ensure_ascii=False))
+                except Exception as e:
+                    logger.error("WebBridge: Error sending stream_end: {}", e)
+            else:
+                self._stream_buffers.pop(stream_id, None)
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message to a connected webbridge client."""
@@ -216,17 +230,16 @@ class WebBridgeChannel(BaseChannel):
             logger.warning("WebBridge: No connected client for api_key {}", api_key)
             return
         
+        # If this is a streaming delta, use send_delta
+        if msg.metadata.get("_stream_delta"):
+            await self.send_delta(api_key, msg.content, msg.metadata)
+            return
+        
+        # Regular message send (non-streaming or final message)
         try:
-            ws = self._ws_connections[api_key]
-            
-            # Stream content if enabled and there's content
-            if self.config.streaming and msg.content:
-                await self._stream_message(ws, msg.content)
-            
-            # Always send final message (even if empty, for completion signal)
             payload = {
                 "type": "message",
-                "content": msg.content or "",
+                "content": msg.content,
                 "chat_id": msg.chat_id,
             }
             if msg.media:
@@ -234,8 +247,8 @@ class WebBridgeChannel(BaseChannel):
             if msg.reply_to:
                 payload["reply_to"] = msg.reply_to
             
+            ws = self._ws_connections[api_key]
             await ws.send(json.dumps(payload, ensure_ascii=False))
-            
         except Exception as e:
             logger.error("WebBridge: Error sending message: {}", e)
 
