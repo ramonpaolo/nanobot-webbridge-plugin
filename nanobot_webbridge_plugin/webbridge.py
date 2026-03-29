@@ -177,19 +177,6 @@ class WebBridgeChannel(BaseChannel):
         meta = metadata or {}
         stream_id = meta.get("_stream_id", f"{chat_id}:0")
         
-        # Handle tool hints separately (they come during streaming)
-        if meta.get("_tool_hint"):
-            if chat_id in self._ws_connections:
-                try:
-                    await self._ws_connections[chat_id].send(json.dumps({
-                        "type": "tool_hint",
-                        "content": delta,
-                        "stream_id": stream_id,
-                    }, ensure_ascii=False))
-                except Exception as e:
-                    logger.error("WebBridge: Error sending tool_hint: {}", e)
-            return
-        
         # Handle stream end
         if meta.get("_stream_end"):
             self._stream_active[stream_id] = False
@@ -251,18 +238,8 @@ class WebBridgeChannel(BaseChannel):
             await self.send_delta(api_key, msg.content, msg.metadata)
             return
         
-        # Handle progress messages (tool hints when streaming is not active)
+        # Ignore progress messages (tool hints) - don't send to frontend
         if msg.metadata.get("_progress"):
-            if msg.metadata.get("_tool_hint"):
-                # This is a tool hint - send as tool_hint message type
-                if api_key in self._ws_connections:
-                    try:
-                        await self._ws_connections[api_key].send(json.dumps({
-                            "type": "tool_hint",
-                            "content": msg.content,
-                        }, ensure_ascii=False))
-                    except Exception as e:
-                        logger.error("WebBridge: Error sending tool_hint: {}", e)
             return
         
         # Regular message send (non-streaming or final message)
