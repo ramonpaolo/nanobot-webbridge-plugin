@@ -177,6 +177,39 @@ class WebBridgeChannel(BaseChannel):
         meta = metadata or {}
         stream_id = meta.get("_stream_id", f"{chat_id}:0")
         
+        # Handle tool hints separately (they come during streaming)
+        if meta.get("_tool_hint"):
+            if chat_id in self._ws_connections:
+                try:
+                    await self._ws_connections[chat_id].send(json.dumps({
+                        "type": "tool_hint",
+                        "content": delta,
+                        "stream_id": stream_id,
+                    }, ensure_ascii=False))
+                except Exception as e:
+                    logger.error("WebBridge: Error sending tool_hint: {}", e)
+            return
+        
+        # Handle stream end
+        if meta.get("_stream_end"):
+            self._stream_active[stream_id] = False
+            
+            # Send final message with complete content
+            if chat_id in self._ws_connections:
+                try:
+                    full_content = self._stream_buffers.pop(stream_id, "")
+                    await self._ws_connections[chat_id].send(json.dumps({
+                        "type": "message",
+                        "content": full_content,
+                        "stream_id": stream_id,
+                        "stream_end": True,
+                    }, ensure_ascii=False))
+                except Exception as e:
+                    logger.error("WebBridge: Error sending stream_end: {}", e)
+            else:
+                self._stream_buffers.pop(stream_id, None)
+            return
+        
         # Get or create stream buffer
         if stream_id not in self._stream_buffers:
             self._stream_buffers[stream_id] = ""
@@ -204,25 +237,6 @@ class WebBridgeChannel(BaseChannel):
                 }, ensure_ascii=False))
             except Exception as e:
                 logger.error("WebBridge: Error sending chunk: {}", e)
-        
-        # Check for stream end
-        if meta.get("_stream_end"):
-            self._stream_active[stream_id] = False
-            
-            # Send final message with complete content
-            if chat_id in self._ws_connections:
-                try:
-                    full_content = self._stream_buffers.pop(stream_id, "")
-                    await self._ws_connections[chat_id].send(json.dumps({
-                        "type": "message",
-                        "content": full_content,
-                        "stream_id": stream_id,
-                        "stream_end": True,
-                    }, ensure_ascii=False))
-                except Exception as e:
-                    logger.error("WebBridge: Error sending stream_end: {}", e)
-            else:
-                self._stream_buffers.pop(stream_id, None)
 
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message to a connected webbridge client."""
@@ -232,9 +246,23 @@ class WebBridgeChannel(BaseChannel):
             logger.warning("WebBridge: No connected client for api_key {}", api_key)
             return
         
-        # If this is a streaming delta, use send_delta
+        # Handle streaming deltas
         if msg.metadata.get("_stream_delta"):
             await self.send_delta(api_key, msg.content, msg.metadata)
+            return
+        
+        # Handle progress messages (tool hints when streaming is not active)
+        if msg.metadata.get("_progress"):
+            if msg.metadata.get("_tool_hint"):
+                # This is a tool hint - send as tool_hint message type
+                if api_key in self._ws_connections:
+                    try:
+                        await self._ws_connections[api_key].send(json.dumps({
+                            "type": "tool_hint",
+                            "content": msg.content,
+                        }, ensure_ascii=False))
+                    except Exception as e:
+                        logger.error("WebBridge: Error sending tool_hint: {}", e)
             return
         
         # Regular message send (non-streaming or final message)
