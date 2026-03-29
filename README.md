@@ -1,6 +1,6 @@
 # nanobot-webbridge-plugin
 
-🎉 **WebBridge channel plugin for [nanobot](https://github.com/ramonpaolo/nanobot)** — Enables a beautiful web chat interface for your AI agent!
+🎉 **WebBridge channel plugin for [nanobot](https://github.com/ramonpaolo/nanobot)** — Enables a beautiful web chat interface with **streaming responses** for your AI agent!
 
 This plugin adds a WebSocket server to nanobot that accepts connections from [agent-webbridge](https://github.com/ramonpaolo/webbridge-agent), providing a universal web frontend.
 
@@ -18,6 +18,44 @@ This plugin adds a WebSocket server to nanobot that accepts connections from [ag
          │  User's Browser                                                             │
          └──────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Features
+
+- 🔐 **Secure** — API Key + HMAC + IP whitelist
+- 🌐 **Universal** — Works with any WebSocket agent (nanobot, openclaw, etc.)
+- 💬 **Real-time Streaming** — Responses appear word by word as AI generates them
+- 📎 **File Upload** — Images, PDFs, documents
+- 🎨 **Modern UI** — Dark-themed, responsive design
+- 🔄 **Auto-reconnect** — Automatic reconnection on disconnect
+- 📱 **Responsive** — Works on desktop and mobile
+
+---
+
+## Streaming Configuration
+
+The plugin supports **real-time streaming** of AI responses. Messages are sent as chunks for a natural feel.
+
+```json
+{
+  "channels": {
+    "webbridge": {
+      "enabled": true,
+      "streaming": true,
+      "stream_chars_per_second": 100,
+      "host": "0.0.0.0",
+      "port": 18791,
+      "allowed_connections": [...]
+    }
+  }
+}
+```
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `streaming` | boolean | `true` | Enable/disable streaming |
+| `stream_chars_per_second` | integer | `100` | Speed of streaming (chars per second) |
 
 ---
 

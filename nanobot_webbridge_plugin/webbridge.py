@@ -32,6 +32,8 @@ class WebBridgeConfig(Base):
     port: int = 18791
     allowed_connections: list[AllowedConnection] = Field(default_factory=list)
     hmac_secret: str = ""  # Shared secret for HMAC signatures
+    streaming: bool = True  # Enable streaming response
+    stream_chars_per_second: int = 100  # Speed of streaming simulation
 
 
 class WebBridgeChannel(BaseChannel):
@@ -43,6 +45,11 @@ class WebBridgeChannel(BaseChannel):
     2. Optional IP whitelisting per API Key
     3. HMAC signature verification on every message
     
+    Streaming:
+    - Messages are sent as chunks for real-time feel
+    - Each chunk: {"type": "chunk", "content": "partial_text"}
+    - Final: {"type": "message", "content": "full_text", "chat_id": "..."}
+    
     Configuration in nanobot config.json:
     
     {
@@ -52,6 +59,8 @@ class WebBridgeChannel(BaseChannel):
           "host": "0.0.0.0",
           "port": 18791,
           "hmac_secret": "optional_hmac_secret",
+          "streaming": true,
+          "stream_chars_per_second": 100,
           "allowed_connections": [
             {
               "api_key": "sk_live_your_api_key",
@@ -152,6 +161,53 @@ class WebBridgeChannel(BaseChannel):
         self._ws_connections.clear()
         logger.info("WebBridge server stopped")
 
+    async def _stream_message(self, ws: Any, content: str) -> None:
+        """
+        Stream a message as chunks to the WebSocket client.
+        
+        Format:
+        - Start: {"type": "stream_start", "chat_id": "..."}
+        - Chunks: {"type": "chunk", "content": "partial_text"}
+        - End: {"type": "message", "content": "full_text", "chat_id": "..."}
+        """
+        if not content or not self.config.streaming:
+            return
+        
+        chars_per_second = self.config.stream_chars_per_second
+        delay = 1.0 / chars_per_second if chars_per_second > 0 else 0.01
+        
+        # Send stream start
+        await ws.send(json.dumps({
+            "type": "stream_start",
+            "content": ""
+        }, ensure_ascii=False))
+        
+        # Stream content in chunks
+        # Use word-based chunks for more natural feel
+        words = content.split()
+        buffer = ""
+        
+        for word in words:
+            buffer += word + " "
+            
+            # Send chunk when buffer is large enough or at end
+            if len(buffer) >= 4 or word == words[-1]:
+                await ws.send(json.dumps({
+                    "type": "chunk",
+                    "content": buffer
+                }, ensure_ascii=False))
+                buffer = ""
+                
+                if delay > 0:
+                    await asyncio.sleep(delay)
+        
+        # If anything left in buffer, send it
+        if buffer:
+            await ws.send(json.dumps({
+                "type": "chunk",
+                "content": buffer
+            }, ensure_ascii=False))
+
     async def send(self, msg: OutboundMessage) -> None:
         """Send a message to a connected webbridge client."""
         api_key = msg.chat_id
@@ -161,9 +217,16 @@ class WebBridgeChannel(BaseChannel):
             return
         
         try:
+            ws = self._ws_connections[api_key]
+            
+            # Stream content if enabled and there's content
+            if self.config.streaming and msg.content:
+                await self._stream_message(ws, msg.content)
+            
+            # Always send final message (even if empty, for completion signal)
             payload = {
                 "type": "message",
-                "content": msg.content,
+                "content": msg.content or "",
                 "chat_id": msg.chat_id,
             }
             if msg.media:
@@ -171,8 +234,8 @@ class WebBridgeChannel(BaseChannel):
             if msg.reply_to:
                 payload["reply_to"] = msg.reply_to
             
-            ws = self._ws_connections[api_key]
             await ws.send(json.dumps(payload, ensure_ascii=False))
+            
         except Exception as e:
             logger.error("WebBridge: Error sending message: {}", e)
 
