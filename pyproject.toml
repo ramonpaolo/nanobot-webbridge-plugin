@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nanobot-webbridge-plugin"
-version = "1.0.0"
+version = "1.0.1"
 description = "WebBridge channel plugin for nanobot - universal web interface"
 readme = "README.md"
 license = "MIT"
@@ -35,4 +35,4 @@ Issues = "https://github.com/ramonpaolo/nanobot-webbridge-plugin/issues"
 webbridge = "nanobot_webbridge_plugin:WebBridgeChannel"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/"]
+packages = ["nanobot_webbridge_plugin/"]
