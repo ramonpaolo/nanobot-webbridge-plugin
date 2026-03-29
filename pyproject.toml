@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nanobot-webbridge-plugin"
-version = "1.3.0"
+version = "1.4.0"
 description = "WebBridge channel plugin for nanobot - universal web interface"
 readme = "README.md"
 license = {text = "MIT"}
