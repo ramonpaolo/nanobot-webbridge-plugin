@@ -1,12 +1,14 @@
 """WebBridge channel for nanobot — universal web interface for agents."""
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
 import secrets
 import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -315,7 +317,11 @@ class WebBridgeChannel(BaseChannel):
         """Handle an incoming message from a webbridge client."""
         msg_type = data.get("type")
         
-        if msg_type == "message":
+        if msg_type == "upload":
+            # Handle file upload - receive base64 data and save locally
+            await self._handle_file_upload(data, api_key)
+        
+        elif msg_type == "message":
             content = data.get("content", "")
             sender_id = data.get("sender_id", api_key)
             media = data.get("media", [])
@@ -352,6 +358,86 @@ class WebBridgeChannel(BaseChannel):
         elif msg_type == "ack":
             message_id = data.get("message_id")
             logger.debug("WebBridge: Message {} acknowledged", message_id)
+
+    async def _handle_file_upload(self, data: dict, api_key: str) -> None:
+        """
+        Handle file upload from frontend.
+        Receives base64-encoded file data and saves locally for nanobot to access.
+        """
+        import base64
+        import os
+        from pathlib import Path
+        
+        upload_id = data.get("upload_id")
+        file_name = data.get("name", "upload")
+        file_type = data.get("type", "application/octet-stream")
+        file_data = data.get("data", "")  # base64 encoded
+        
+        if not upload_id or not file_data:
+            await self._send_upload_error(api_key, upload_id, "Missing upload_id or data")
+            return
+        
+        try:
+            # Decode base64 data
+            file_bytes = base64.b64decode(file_data)
+            
+            # Create uploads directory in nanobot's media directory
+            uploads_dir = Path.home() / ".nanobot" / "media" / "webbridge"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate unique filename to avoid collisions
+            ext = Path(file_name).suffix.lower() or self._get_extension_from_mime(file_type)
+            unique_name = f"{secrets.token_urlsafe(16)}{ext}"
+            file_path = uploads_dir / unique_name
+            
+            # Save file
+            with open(file_path, "wb") as f:
+                f.write(file_bytes)
+            
+            logger.info("WebBridge: File uploaded: {} -> {}", file_name, file_path)
+            
+            # Send success response
+            await self._ws_connections.get(api_key).send(json.dumps({
+                "type": "upload_success",
+                "upload_id": upload_id,
+                "name": file_name,
+                "path": str(file_path),
+                "type": file_type,
+                "size": len(file_bytes)
+            }, ensure_ascii=False))
+            
+        except Exception as e:
+            logger.error("WebBridge: File upload error: {}", e)
+            await self._send_upload_error(api_key, upload_id, str(e))
+    
+    def _get_extension_from_mime(self, mime_type: str) -> str:
+        """Get file extension from MIME type."""
+        mime_to_ext = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/gif": ".gif",
+            "image/webp": ".webp",
+            "image/svg+xml": ".svg",
+            "application/pdf": ".pdf",
+            "text/plain": ".txt",
+            "text/html": ".html",
+            "text/css": ".css",
+            "text/javascript": ".js",
+            "application/json": ".json",
+            "application/xml": ".xml",
+            "application/zip": ".zip",
+        }
+        return mime_to_ext.get(mime_type, "")
+    
+    async def _send_upload_error(self, api_key: str, upload_id: str, error: str) -> None:
+        """Send upload error response."""
+        ws = self._ws_connections.get(api_key)
+        if ws:
+            await ws.send(json.dumps({
+                "type": "upload_error",
+                "upload_id": upload_id,
+                "error": error
+            }, ensure_ascii=False))
 
     def is_allowed(self, sender_id: str) -> bool:
         """Check if sender_id is permitted."""
